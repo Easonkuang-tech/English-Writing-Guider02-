@@ -1,0 +1,10 @@
+.env
+.env.local
+*.log
+node_modules/
+.DS_Store
+Thumbs.db
+browser-*.png
+home-*.png
+data/local-data.json
+data/backups/
