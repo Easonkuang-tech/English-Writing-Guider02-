@@ -42,6 +42,22 @@ import {
   runCorpusRetrieval,
 } from "./deepseek.mjs";
 import { PROMPTS_MARKDOWN } from "./prompts-data.mjs";
+import {
+  apiFetch,
+  getAuthConfig,
+  getSession,
+  initializeAuth,
+  sendMagicLink,
+  signInWithPassword,
+  signOut,
+  signUpWithPassword,
+} from "./auth.mjs";
+import {
+  loadAdminDashboard,
+  loadUserDetail,
+  resendLoginEmail,
+  setUserStatus,
+} from "./admin.mjs";
 
 const STORAGE_KEY = "bandcraft:data:v1";
 const DRAFT_PREFIX = "bandcraft:draft:";
@@ -56,6 +72,21 @@ const activation = applyConfigFromUrl();
 const state = {
   data: loadData(),
   route: parseRoute(),
+  auth: {
+    initialized: false,
+    configured: false,
+    required: false,
+    session: null,
+    user: null,
+    profile: null,
+    error: "",
+  },
+  admin: {
+    loading: false,
+    data: null,
+    selectedUser: null,
+    error: "",
+  },
   bank: { query: "", taskType: "all" },
   history: { query: "", filter: "all", tab: "writing" },
   ui: {
@@ -72,6 +103,8 @@ const state = {
     corpusDraft: loadCorpusDraft(),
     activeRetrieval: null,
     dialog: null,
+    authMode: "login",
+    authMethod: "password",
     pendingBackup: null,
     pendingPromptMarkdown: "",
     backupMode: "merge",
@@ -314,9 +347,25 @@ function statValue(value, unit = "") {
 function render() {
   if (state.route.page !== "practice") stopTimer();
   app.innerHTML = renderShell(renderPage());
+  if (
+    state.route.page === "admin"
+    && state.auth.profile?.role === "admin"
+    && !state.admin.data
+    && !state.admin.loading
+  ) {
+    queueMicrotask(loadAdminData);
+  }
 }
 
 function renderPage() {
+  if (!state.auth.initialized) {
+    return `<section class="page auth-loading"><div class="evaluation-orbit">${icon("clock", 28)}</div><h1>正在加载账号</h1></section>`;
+  }
+  if (state.auth.required && !state.auth.session) return renderLoginPage();
+  if (state.route.page === "admin") {
+    if (state.auth.profile?.role !== "admin") return renderUnauthorizedPage();
+    return renderAdminPage();
+  }
   if (state.route.page === "bank") return renderBank();
   if (state.route.page === "practice") return renderPractice();
   if (state.route.page === "corpus") return renderCorpusPage();
@@ -334,10 +383,11 @@ function renderShell(content) {
     ["practice", "练习", "pen"],
     ["history", "历史", "history"],
     ["settings", "设置", "settings"],
+    ...(state.auth.profile?.role === "admin" ? [["admin", "管理", "settings"]] : []),
   ];
   const activePage = state.route.page === "corpus"
     ? "practice"
-    : ["report", "learn"].includes(state.route.page)
+    : ["report", "learn", "admin"].includes(state.route.page)
       ? "history"
       : state.route.page;
   return `
@@ -361,9 +411,10 @@ function renderShell(content) {
         <div class="sidebar-foot">
           <span class="local-dot"></span>
           <div>
-            <strong>本地私人空间</strong>
-            <small>数据保存在当前浏览器</small>
+            <strong>${state.auth.profile ? escapeHtml(state.auth.profile.display_name || "已登录") : "本地私人空间"}</strong>
+            <small>${state.auth.session ? "云端同步已启用" : "数据保存在当前浏览器"}</small>
           </div>
+          ${state.auth.session ? `<button class="icon-button" data-action="sign-out" aria-label="退出登录">${icon("close", 15)}</button>` : ""}
         </div>
       </aside>
 
@@ -380,7 +431,7 @@ function renderShell(content) {
       </main>
 
       <nav class="bottom-nav" aria-label="移动端导航">
-        ${nav.map(([page, label, iconName]) => `
+        ${nav.slice(0, 5).map(([page, label, iconName]) => `
           <a href="#/${page}" class="bottom-nav-item ${activePage === page ? "is-active" : ""}">
             ${icon(iconName, 20)}
             <span>${label}</span>
@@ -403,6 +454,214 @@ function pageHeader(eyebrow, title, description = "", actions = "") {
       ${actions ? `<div class="page-actions">${actions}</div>` : ""}
     </header>
   `;
+}
+
+function renderLoginPage() {
+  const isSignup = state.ui.authMode === "signup";
+  const isMagic = state.ui.authMethod === "magic";
+  return `
+    <main class="auth-page">
+      <section class="auth-card">
+        <a class="brand auth-brand" href="#/home">
+          <span class="brand-mark">B</span>
+          <span><strong>Bandcraft</strong><small>多用户 IELTS 写作训练</small></span>
+        </a>
+        <span class="eyebrow">${isSignup ? "Create Account" : "Welcome Back"}</span>
+        <h1>${isSignup ? "创建你的学习账号" : "登录后继续练习"}</h1>
+        <p>登录后，题库、写作记录、语料库和复习计划会在设备之间同步。</p>
+        <div class="segmented auth-method-tabs">
+          <button class="${!isMagic ? "is-active" : ""}" data-action="set-auth-method" data-value="password">邮箱 + 密码</button>
+          <button class="${isMagic ? "is-active" : ""}" data-action="set-auth-method" data-value="magic">Magic Link</button>
+        </div>
+        <form id="auth-form" class="auth-form">
+          ${isSignup ? `
+            <label class="field"><span>显示名称</span><input name="displayName" autocomplete="name" placeholder="你的名字" /></label>
+          ` : ""}
+          <label class="field"><span>邮箱</span><input name="email" type="email" autocomplete="email" required placeholder="name@example.com" /></label>
+          ${!isMagic ? `
+            <label class="field"><span>密码</span><input name="password" type="password" autocomplete="${isSignup ? "new-password" : "current-password"}" minlength="8" required placeholder="至少 8 位" /></label>
+          ` : ""}
+          ${state.auth.error ? `<div class="notice error-notice">${escapeHtml(state.auth.error)}</div>` : ""}
+          <button class="button button-primary button-large" data-action="${isMagic ? "send-magic-link" : isSignup ? "signup-password" : "signin-password"}" type="button">
+            ${icon(isMagic ? "send" : "check")}${isMagic ? "发送登录链接" : isSignup ? "创建账号" : "登录"}
+          </button>
+        </form>
+        ${!isMagic ? `
+          <button class="text-button auth-switch" data-action="toggle-auth-mode">
+            ${isSignup ? "已有账号？返回登录" : "没有账号？创建账号"}
+          </button>
+        ` : ""}
+        <p class="auth-legal">登录即表示你同意只在自己的设备上使用该学习工具。</p>
+      </section>
+    </main>
+  `;
+}
+
+function renderUnauthorizedPage() {
+  return `
+    <section class="page">
+      ${pageHeader("权限不足", "此页面仅管理员可访问", "当前账号没有管理员角色。")}
+      <div class="empty-state panel"><a class="button button-primary" href="#/home">${icon("home")}返回首页</a></div>
+    </section>
+  `;
+}
+
+function renderAdminPage() {
+  if (state.admin.loading && !state.admin.data) {
+    return `<section class="page admin-page"><div class="admin-loading">${icon("clock", 28)}<h1>正在读取后台数据</h1></div></section>`;
+  }
+  if (state.admin.error) {
+    return `<section class="page admin-page">${pageHeader("管理员后台", "读取失败", state.admin.error, `<button class="button button-primary" data-action="reload-admin">${icon("refresh")}重试</button>`)}</section>`;
+  }
+  const metrics = state.admin.data?.metrics || {};
+  const users = state.admin.data?.users || [];
+  const selected = state.admin.selectedUser;
+  return `
+    <section class="page admin-page">
+      ${pageHeader("Administration", "管理员后台", "多用户数据概览、账号状态和复习进度。", `<button class="button button-ghost" data-action="reload-admin">${icon("refresh")}刷新</button>`)}
+      <div class="admin-metrics">
+        ${[
+          ["用户总数", metrics.users],
+          ["活跃用户", metrics.activeUsers],
+          ["写作记录", metrics.writingAttempts],
+          ["语料条目", metrics.corpusItems],
+          ["待复习", metrics.dueReviews],
+          ["超时复习", metrics.timedOutReviews],
+          ["AI 失败", metrics.aiFailures],
+        ].map(([label, value]) => `<div><span>${label}</span><strong>${value ?? 0}</strong></div>`).join("")}
+      </div>
+      <section class="panel admin-users-panel">
+        <div class="panel-heading"><div><span class="eyebrow">Users</span><h2>用户列表</h2></div><span class="quiet-label">${users.length} 人</span></div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead><tr><th>用户</th><th>角色</th><th>状态</th><th>注册时间</th><th>最近登录</th><th>写作</th><th>语料</th><th>操作</th></tr></thead>
+            <tbody>
+              ${users.map((user) => `
+                <tr>
+                  <td><strong>${escapeHtml(user.display_name || "未命名用户")}</strong><small>${escapeHtml(user.id)}</small></td>
+                  <td>${escapeHtml(user.role || "user")}</td>
+                  <td><span class="status-pill ${user.status === "active" ? "is-ready" : ""}">${user.status === "active" ? "正常" : "已停用"}</span></td>
+                  <td>${formatDate(user.created_at)}</td>
+                  <td>${user.last_seen_at ? formatDate(user.last_seen_at) : "—"}</td>
+                  <td>${user.writingCount || 0}</td>
+                  <td>${user.corpusCount || 0}</td>
+                  <td class="admin-row-actions">
+                    <button class="text-button" data-action="view-admin-user" data-id="${user.id}">详情</button>
+                    <button class="text-button" data-action="toggle-user-status" data-id="${user.id}" data-status="${user.status === "active" ? "disabled" : "active"}">${user.status === "active" ? "停用" : "启用"}</button>
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      ${selected ? renderAdminUserDetail(selected) : ""}
+    </section>
+  `;
+}
+
+function renderAdminUserDetail(detail) {
+  return `
+    <section class="panel admin-user-detail">
+      <div class="panel-heading">
+        <div><span class="eyebrow">User Detail</span><h2>${escapeHtml(detail.profile?.display_name || "用户详情")}</h2></div>
+        <button class="text-button" data-action="close-admin-user">关闭</button>
+      </div>
+      <div class="admin-detail-grid">
+        <div><span>作文记录</span><strong>${detail.attempts.length}</strong></div>
+        <div><span>语料条目</span><strong>${detail.corpus.length}</strong></div>
+        <div><span>复习任务</span><strong>${detail.reviews.length}</strong></div>
+      </div>
+      <div class="admin-content-list">
+        ${detail.attempts.slice(0, 8).map((attempt) => `<article><span>${formatDate(attempt.created_at)}</span><strong>${escapeHtml(attempt.prompt_snapshot?.title || "写作记录")}</strong><p>${escapeHtml(truncate(attempt.response_text, 140))}</p></article>`).join("")}
+        ${detail.corpus.slice(0, 8).map((item) => `<article><span>${escapeHtml(item.stage)}</span><strong>${escapeHtml(item.custom_name || item.target_expression || "语料")}</strong><p>${escapeHtml(truncate(item.chinese_intent, 140))}</p></article>`).join("")}
+      </div>
+    </section>
+  `;
+}
+
+async function submitPasswordAuth(mode) {
+  const form = document.querySelector("#auth-form");
+  if (!form) return;
+  const formData = new FormData(form);
+  const email = String(formData.get("email") || "").trim();
+  const password = String(formData.get("password") || "");
+  const displayName = String(formData.get("displayName") || "").trim();
+  state.auth.error = "";
+  try {
+    if (mode === "signup") {
+      const result = await signUpWithPassword(email, password, displayName);
+      if (!result.access_token) {
+        state.ui.authMode = "login";
+        render();
+        toast("注册申请已提交，请检查邮箱完成确认。", "success");
+        return;
+      }
+    }
+    const result = mode === "signup"
+      ? await signInWithPassword(email, password)
+      : await signInWithPassword(email, password);
+    applyAuthResult(result);
+    toast("登录成功。", "success");
+  } catch (error) {
+    state.auth.error = error.message || "登录失败。";
+    render();
+  }
+}
+
+async function submitMagicLink() {
+  const form = document.querySelector("#auth-form");
+  const email = String(new FormData(form).get("email") || "").trim();
+  state.auth.error = "";
+  try {
+    await sendMagicLink(email);
+    toast("登录链接已发送，请检查邮箱。", "success");
+  } catch (error) {
+    state.auth.error = error.message || "发送失败。";
+    render();
+  }
+}
+
+function applyAuthResult(result) {
+  state.auth.session = result.session || getSession();
+  state.auth.user = result.user || null;
+  state.auth.profile = result.profile || null;
+  navigate("home");
+  render();
+}
+
+async function loadAdminData() {
+  state.admin.loading = true;
+  state.admin.error = "";
+  render();
+  try {
+    state.admin.data = await loadAdminDashboard();
+  } catch (error) {
+    state.admin.error = error.message || "后台加载失败。";
+  } finally {
+    state.admin.loading = false;
+    render();
+  }
+}
+
+async function viewAdminUser(userId) {
+  state.admin.error = "";
+  try {
+    state.admin.selectedUser = await loadUserDetail(userId);
+    render();
+  } catch (error) {
+    toast(error.message || "用户详情加载失败。", "error");
+  }
+}
+
+async function toggleAdminUserStatus(userId, status) {
+  try {
+    await setUserStatus(userId, status);
+    state.admin.selectedUser = null;
+    await loadAdminData();
+  } catch (error) {
+    toast(error.message || "账号状态更新失败。", "error");
+  }
 }
 
 function renderHome() {
@@ -3806,6 +4065,42 @@ app.addEventListener("click", async (event) => {
     navigate("home");
     setTimeout(() => document.querySelector("#today-vocabulary")?.focus(), 0);
   }
+  if (action === "set-auth-method") {
+    state.ui.authMethod = trigger.dataset.value === "magic" ? "magic" : "password";
+    state.auth.error = "";
+    render();
+  }
+  if (action === "toggle-auth-mode") {
+    state.ui.authMode = state.ui.authMode === "signup" ? "login" : "signup";
+    state.auth.error = "";
+    render();
+  }
+  if (action === "signin-password") await submitPasswordAuth("login");
+  if (action === "signup-password") await submitPasswordAuth("signup");
+  if (action === "send-magic-link") await submitMagicLink();
+  if (action === "sign-out") {
+    await signOut();
+    state.auth = {
+      ...state.auth,
+      session: null,
+      user: null,
+      profile: null,
+      error: "",
+    };
+    navigate("home");
+    render();
+  }
+  if (action === "reload-admin") await loadAdminData();
+  if (action === "view-admin-user") await viewAdminUser(trigger.dataset.id);
+  if (action === "toggle-user-status") await toggleAdminUserStatus(trigger.dataset.id, trigger.dataset.status);
+  if (action === "close-admin-user") {
+    state.admin.selectedUser = null;
+    render();
+  }
+  if (action === "resend-login-email") {
+    await resendLoginEmail(trigger.dataset.email);
+    toast("登录邮件已重新发送。", "success");
+  }
   if (action === "match-prompt") await handleMatch();
   if (action === "set-practice-mode") {
     navigate(trigger.dataset.value === "corpus" ? "corpus" : "practice");
@@ -4175,7 +4470,26 @@ window.addEventListener("hashchange", () => {
 });
 
 async function init() {
-  await hydratePrompts();
+  try {
+    const authResult = await initializeAuth();
+    state.auth = {
+      ...state.auth,
+      initialized: true,
+      configured: Boolean(authResult.configured),
+      required: Boolean(getAuthConfig().authRequired),
+      session: authResult.session || null,
+      user: authResult.user || null,
+      profile: authResult.profile || null,
+      error: "",
+    };
+  } catch (error) {
+    state.auth = {
+      ...state.auth,
+      initialized: true,
+      error: error.message || "账号服务加载失败。",
+    };
+  }
+  if (!state.auth.required || state.auth.session) await hydratePrompts();
   await refreshServerStatus();
   render();
   window.setInterval(updateCorpusCountdowns, 1000);

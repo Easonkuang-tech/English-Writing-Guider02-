@@ -122,6 +122,9 @@ DeepSeek Key in Railway variables.
 - Ability level and test-type preferences adapt later retrieval difficulty.
 - Autosaved drafts, timer, history search, and full reports.
 - Versioned JSON backup and Markdown practice export.
+- Supabase Auth with Email Magic Link and email/password login.
+- Multiuser data isolation through Supabase Row Level Security.
+- Admin dashboard with user, writing, corpus, review, and AI-status metrics.
 
 ## Test
 

@@ -14,6 +14,9 @@ const PORT = Number(process.env.PORT) || 4173;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || "";
 const DEEPSEEK_BASE_URL = (process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com").replace(/\/+$/, "");
 const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/rest\/v1\/?$/, "").replace(/\/+$/, "");
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
+const APP_ORIGIN = process.env.APP_ORIGIN || "";
 const DAILY_RUBRIC_SOURCE = "Daily IELTS Mini Practice Rubric v0.2";
 const FORMAL_RUBRIC_SOURCE = "IELTS public Writing band descriptors + 雅思正式写作评分系统.md v0.1";
 const RUBRIC_RETRIEVED_DATE = "2026-09-17";
@@ -38,9 +41,16 @@ const server = createServer(async (request, response) => {
       return sendJson(response, 200, {
         status: "ok",
         aiConfigured: Boolean(DEEPSEEK_API_KEY),
-        databaseConfigured: Boolean(
-          process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY,
-        ),
+        databaseConfigured: Boolean(SUPABASE_URL && SUPABASE_ANON_KEY),
+      });
+    }
+
+    if (url.pathname === "/api/public-config" && request.method === "GET") {
+      return sendJson(response, 200, {
+        supabaseUrl: SUPABASE_URL,
+        supabaseAnonKey: SUPABASE_ANON_KEY,
+        appOrigin: APP_ORIGIN,
+        authRequired: Boolean(SUPABASE_URL && SUPABASE_ANON_KEY),
       });
     }
 
