@@ -58,6 +58,12 @@ import {
   resendLoginEmail,
   setUserStatus,
 } from "./admin.mjs";
+import {
+  ensureSyncMeta,
+  pullCloudState,
+  pushCloudState,
+  reconcileCloudState,
+} from "./cloud-sync.mjs";
 
 const STORAGE_KEY = "bandcraft:data:v1";
 const DRAFT_PREFIX = "bandcraft:draft:";
@@ -110,12 +116,19 @@ const state = {
     backupMode: "merge",
   },
   serverStatus: null,
+  sync: {
+    status: "idle",
+    error: "",
+    lastSyncedAt: null,
+  },
   timer: {
     totalSeconds: 0,
     remainingSeconds: 0,
     handle: null,
   },
 };
+
+let cloudSaveTimer = null;
 
 const ICONS = {
   home: '<path d="M3 10.7 12 3l9 7.7"/><path d="M5.5 9.5V21h13V9.5"/><path d="M9.5 21v-6h5v6"/>',
@@ -166,8 +179,7 @@ function defaultData() {
 function loadData() {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
-    if (!parsed || typeof parsed !== "object") return defaultData();
-    return {
+    const data = !parsed || typeof parsed !== "object" ? defaultData() : {
       ...defaultData(),
       ...parsed,
       prompts: Array.isArray(parsed.prompts) ? parsed.prompts : [],
@@ -180,13 +192,25 @@ function loadData() {
       corpusUsageRecords: Array.isArray(parsed.corpusUsageRecords) ? parsed.corpusUsageRecords : [],
       settings: parsed.settings && typeof parsed.settings === "object" ? parsed.settings : {},
     };
+    ensureSyncMeta(data);
+    return data;
   } catch {
-    return defaultData();
+    const data = defaultData();
+    ensureSyncMeta(data);
+    return data;
   }
 }
 
-function saveData() {
+function saveData(options = {}) {
+  const sync = ensureSyncMeta(state.data);
+  if (options.markChanged !== false) {
+    sync.version = (Number(sync.version) || 0) + 1;
+    sync.updatedAt = new Date().toISOString();
+  }
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.data));
+  if (options.cloud !== false && state.auth?.session?.user?.id) {
+    scheduleCloudSave();
+  }
 }
 
 function loadCorpusDraft() {
@@ -601,7 +625,7 @@ async function submitPasswordAuth(mode) {
     const result = mode === "signup"
       ? await signInWithPassword(email, password)
       : await signInWithPassword(email, password);
-    applyAuthResult(result);
+    await applyAuthResult(result);
     toast("登录成功。", "success");
   } catch (error) {
     state.auth.error = error.message || "登录失败。";
@@ -622,10 +646,11 @@ async function submitMagicLink() {
   }
 }
 
-function applyAuthResult(result) {
+async function applyAuthResult(result) {
   state.auth.session = result.session || getSession();
   state.auth.user = result.user || null;
   state.auth.profile = result.profile || null;
+  await syncNow({ renderAfter: false });
   navigate("home");
   render();
 }
@@ -3328,12 +3353,19 @@ function renderSettings() {
     attempts: state.data.attempts.length,
     corpus: state.data.corpusItems.length,
   };
+  const syncLabel = {
+    idle: "等待同步",
+    pending: "待同步",
+    syncing: "正在同步",
+    synced: "已同步",
+    error: "同步失败",
+  }[state.sync.status] || "等待同步";
   return `
     <section class="page">
       ${pageHeader(
         "设置",
-        "本地空间与数据",
-        "数据保存在当前浏览器。DeepSeek Key 只保存在本机 localStorage。",
+        "云端空间与数据",
+        "本地保留离线缓存，登录后自动同步到 Supabase。",
         `<span class="status-pill ${state.serverStatus?.configured ? "is-ready" : ""}">${state.serverStatus?.configured ? "DeepSeek 已连接" : "DeepSeek 未配置"}</span>`
       )}
 
@@ -3348,7 +3380,7 @@ function renderSettings() {
             <div>${statValue(counts.attempts, "练习")}</div>
             <div>${statValue(counts.corpus, "语料")}</div>
           </div>
-          <p class="quiet-copy">所有题目、素材、作文、评分和反馈都保存在浏览器 localStorage 中。</p>
+          <p class="quiet-copy">浏览器 localStorage 作为离线缓存；登录后数据同步到你的 Supabase 账号。</p>
         </section>
 
         <section class="panel settings-panel">
@@ -3411,7 +3443,24 @@ function renderSettings() {
               填写你的 DeepSeek API Key 以启用 AI 评价、推荐、修改批改、进阶学习与语料练习。Key 只保存在当前浏览器的 localStorage 中，不会被上传到云端。
             </div>
           ` : ""}
-          <p class="quiet-copy">提示：API Key 会以 Bearer Token 方式从浏览器直接调用 DeepSeek，请只在你信任的设备上使用。换浏览器或换设备时，点「复制激活链接」拿到一条带 Key 的专属链接，在新设备打开一次即可自动配置（地址栏随即清除 Key 痕迹）。</p>
+          <p class="quiet-copy">提示：浏览器未保存 Key 时，会自动通过 Railway 服务端代理调用 DeepSeek。</p>
+        </section>
+
+        <section class="panel settings-panel wide">
+          <div class="panel-heading">
+            <div><span class="eyebrow">Cloud Sync</span><h2>Supabase 云端同步</h2></div>
+            <span class="status-pill ${state.sync.status === "synced" ? "is-ready" : ""}">${syncLabel}</span>
+          </div>
+          <dl class="status-list">
+            <div><dt>当前账号</dt><dd>${escapeHtml(state.auth.user?.email || "未登录")}</dd></div>
+            <div><dt>云端版本</dt><dd>${state.data._sync?.version || 0}</dd></div>
+            <div><dt>最近同步</dt><dd>${state.data._sync?.lastSyncedAt ? formatDate(state.data._sync.lastSyncedAt) : "尚未同步"}</dd></div>
+            <div><dt>同步方式</dt><dd>localStorage ↔ Supabase</dd></div>
+          </dl>
+          ${state.sync.error ? `<div class="notice error-notice">${escapeHtml(state.sync.error)}</div>` : ""}
+          <div class="backup-actions">
+            <button class="button button-primary" data-action="sync-now" type="button">${icon("refresh")}立即同步</button>
+          </div>
         </section>
 
         <section class="panel settings-panel wide">
@@ -3648,6 +3697,52 @@ async function refreshServerStatus() {
     baseUrl: config.baseUrl,
     source: config.apiKey ? "browser" : "local",
   };
+}
+
+function setSyncStatus(status, error = "") {
+  state.sync.status = status;
+  state.sync.error = error;
+  state.sync.lastSyncedAt = state.data._sync?.lastSyncedAt || state.sync.lastSyncedAt;
+}
+
+function scheduleCloudSave() {
+  if (!state.auth?.session?.user?.id) return;
+  setSyncStatus("pending");
+  clearTimeout(cloudSaveTimer);
+  cloudSaveTimer = setTimeout(async () => {
+    try {
+      setSyncStatus("syncing");
+      render();
+      await pushCloudState(state.auth.user.id, state.data);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state.data));
+      setSyncStatus("synced");
+      render();
+    } catch (error) {
+      setSyncStatus("error", error.message || "云端同步失败。");
+      render();
+    }
+  }, 1200);
+}
+
+async function syncNow({ renderAfter = true } = {}) {
+  if (!state.auth?.session?.user?.id) return null;
+  setSyncStatus("syncing");
+  if (renderAfter) render();
+  try {
+    const result = await reconcileCloudState(state.auth.user.id, state.data);
+    if (result.action === "downloaded") {
+      state.data = result.data;
+      ensureSyncMeta(state.data);
+      saveData({ cloud: false, markChanged: false });
+    }
+    setSyncStatus("synced");
+    if (renderAfter) render();
+    return result.action;
+  } catch (error) {
+    setSyncStatus("error", error.message || "云端同步失败。");
+    if (renderAfter) render();
+    return null;
+  }
 }
 
 async function testDeepSeekConnection() {
@@ -4090,6 +4185,19 @@ app.addEventListener("click", async (event) => {
     navigate("home");
     render();
   }
+  if (action === "sync-now") {
+    const result = await syncNow();
+    toast(
+      result === "downloaded"
+        ? "已下载云端最新数据。"
+        : result === "uploaded"
+          ? "已上传本机最新数据。"
+          : result === "unchanged"
+            ? "本地与云端已一致。"
+            : "同步未完成，请查看错误。",
+      result ? "success" : "error",
+    );
+  }
   if (action === "reload-admin") await loadAdminData();
   if (action === "view-admin-user") await viewAdminUser(trigger.dataset.id);
   if (action === "toggle-user-status") await toggleAdminUserStatus(trigger.dataset.id, trigger.dataset.status);
@@ -4489,6 +4597,7 @@ async function init() {
       error: error.message || "账号服务加载失败。",
     };
   }
+  if (state.auth.session) await syncNow({ renderAfter: false });
   if (!state.auth.required || state.auth.session) await hydratePrompts();
   await refreshServerStatus();
   render();
@@ -4498,6 +4607,7 @@ async function init() {
     await refreshServerStatus();
     if (before !== state.serverStatus?.configured) render();
   }, 30000);
+  window.setInterval(() => syncNow({ renderAfter: false }), 60000);
   if (activation) {
     toast(
       activation.changed

@@ -6,5 +6,6 @@ node_modules/
 Thumbs.db
 browser-*.png
 home-*.png
+railway-*.png
 data/local-data.json
 data/backups/
