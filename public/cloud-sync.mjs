@@ -83,6 +83,16 @@ export async function reconcileCloudState(userId, localData) {
   }
 
   const merged = mergeBackupData(localData, remote.data);
+  merged.prompts = mergeByCompositeKey(
+    localData.prompts,
+    remote.data.prompts,
+    (prompt) => `${prompt.taskType}:${String(prompt.title || "").trim().toLowerCase()}`,
+  );
+  merged.dailySessions = mergeByCompositeKey(
+    localData.dailySessions,
+    remote.data.dailySessions,
+    (session) => session.localDate,
+  );
   const mergedSync = ensureSyncMeta(merged);
   mergedSync.version = Math.max(
     Number(localSync.version) || 0,
@@ -106,4 +116,13 @@ function isEmptyState(data = {}) {
     "corpusUsageRecords",
   ];
   return sections.every((key) => !Array.isArray(data?.[key]) || data[key].length === 0);
+}
+
+function mergeByCompositeKey(localRows = [], remoteRows = [], keyFor) {
+  const merged = new Map();
+  [...(localRows || []), ...(remoteRows || [])].forEach((row) => {
+    const key = keyFor(row);
+    if (!key || !merged.has(key)) merged.set(key, row);
+  });
+  return [...merged.values()];
 }
