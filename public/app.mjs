@@ -3730,7 +3730,7 @@ async function syncNow({ renderAfter = true } = {}) {
   if (renderAfter) render();
   try {
     const result = await reconcileCloudState(state.auth.user.id, state.data);
-    if (result.action === "downloaded") {
+    if (result.action === "downloaded" || result.action === "merged") {
       state.data = result.data;
       ensureSyncMeta(state.data);
       saveData({ cloud: false, markChanged: false });
@@ -4190,6 +4190,8 @@ app.addEventListener("click", async (event) => {
     toast(
       result === "downloaded"
         ? "已下载云端最新数据。"
+        : result === "merged"
+          ? "已合并电脑和手机数据并上传云端。"
         : result === "uploaded"
           ? "已上传本机最新数据。"
           : result === "unchanged"

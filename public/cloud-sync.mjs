@@ -1,4 +1,5 @@
 import { apiFetch } from "./auth.mjs";
+import { mergeBackupData } from "./core.mjs";
 
 const DEVICE_KEY = "bandcraft:device-id:v1";
 
@@ -72,18 +73,37 @@ export async function reconcileCloudState(userId, localData) {
     return { action: "uploaded", data: localData };
   }
 
-  const localTime = new Date(localSync.updatedAt || 0).getTime();
-  const remoteTime = new Date(remote.data?._sync?.updatedAt || remote.updatedAt || 0).getTime();
-
-  if (remoteTime > localTime) {
+  if (isEmptyState(localData)) {
     return { action: "downloaded", data: remote.data };
   }
 
-  if (localTime > remoteTime) {
+  if (isEmptyState(remote.data)) {
     await pushCloudState(userId, localData);
     return { action: "uploaded", data: localData };
   }
 
-  localSync.lastSyncedAt = new Date().toISOString();
-  return { action: "unchanged", data: localData };
+  const merged = mergeBackupData(localData, remote.data);
+  const mergedSync = ensureSyncMeta(merged);
+  mergedSync.version = Math.max(
+    Number(localSync.version) || 0,
+    Number(remote.data?._sync?.version) || 0,
+    Number(remote.version) || 0,
+  ) + 1;
+  mergedSync.updatedAt = new Date().toISOString();
+  await pushCloudState(userId, merged);
+  return { action: "merged", data: merged };
+}
+
+function isEmptyState(data = {}) {
+  const sections = [
+    "prompts",
+    "dailySessions",
+    "attempts",
+    "learningExtensions",
+    "revisionSessions",
+    "corpusItems",
+    "corpusAttempts",
+    "corpusUsageRecords",
+  ];
+  return sections.every((key) => !Array.isArray(data?.[key]) || data[key].length === 0);
 }

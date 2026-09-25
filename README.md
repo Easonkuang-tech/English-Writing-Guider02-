@@ -125,6 +125,8 @@ DeepSeek Key in Railway variables.
 - Supabase Auth with Email Magic Link and email/password login.
 - Multiuser data isolation through Supabase Row Level Security.
 - Admin dashboard with user, writing, corpus, review, and AI-status metrics.
+- Local-first Supabase synchronization through `user_settings.payload`, with
+  ID-based merge when computer and mobile both contain data.
 
 ## Test
 
